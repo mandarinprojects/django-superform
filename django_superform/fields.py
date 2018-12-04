@@ -1,52 +1,11 @@
 from django.forms.models import inlineformset_factory
+from django.forms import Field
 
 from .boundfield import CompositeBoundField
 from .widgets import FormWidget, FormSetWidget
 
 
-class BaseCompositeField(object):
-    """
-    The ``BaseCompositeField`` takes care of keeping some kind of compatibility
-    with the ``django.forms.Field`` class.
-    """
-
-    widget = None
-    show_hidden_initial = False
-
-    # Tracks each time a FormSetField instance is created. Used to retain
-    # order.
-    creation_counter = 0
-
-    def __init__(self, required=True, widget=None, label=None, help_text='',
-                 localize=False, disabled=False):
-        self.required = required
-        self.label = label
-        self.help_text = help_text
-        self.disabled = disabled
-
-        widget = widget or self.widget
-        if isinstance(widget, type):
-            widget = widget()
-
-        # Trigger the localization machinery if needed.
-        self.localize = localize
-        if self.localize:
-            widget.is_localized = True
-
-        # Let the widget know whether it should display as required.
-        widget.is_required = self.required
-
-        # We do not call self.widget_attrs() here as the original field is
-        # doing it.
-
-        self.widget = widget
-
-        # Increase the creation counter, and save our local copy.
-        self.creation_counter = BaseCompositeField.creation_counter
-        BaseCompositeField.creation_counter += 1
-
-
-class CompositeField(BaseCompositeField):
+class CompositeField(Field):
     """
     Implements the base structure that is relevant for all composite fields.
     This field cannot be used directly, use a subclass of it.
@@ -152,32 +111,27 @@ class FormField(CompositeField):
     widget = FormWidget
 
     def __init__(self, form_class, kwargs=None, **field_kwargs):
+        self.form_class = form_class
         super(FormField, self).__init__(**field_kwargs)
 
-        self.form_class = form_class
         if kwargs is None:
             kwargs = {}
         self.default_kwargs = kwargs
-
-    def get_form_class(self, form, name):
-        """
-        Return the form class that will be used for instantiation in
-        ``get_form``. You can override this method in subclasses to change
-        the behaviour of the given form class.
-        """
-        return self.form_class
 
     def get_form(self, form, name):
         """
         Get an instance of the form.
         """
         kwargs = self.get_kwargs(form, name)
-        form_class = self.get_form_class(form, name)
+        form_class = self.form_class
         composite_form = form_class(
             data=form.data if form.is_bound else None,
             files=form.files if form.is_bound else None,
             **kwargs)
         return composite_form
+
+    def widget_attrs(self, widget):
+        return {'form_class': self.form_class}
 
 
 class ModelFormField(FormField):
@@ -295,7 +249,7 @@ class ForeignKeyFormField(ModelFormField):
                 kwargs['empty_permitted'] = True
         return kwargs
 
-    def get_field_name(self, form, name):
+    def get_field_name(self, name):
         return self.field_name or name
 
     def allow_blank(self, form, name):
@@ -306,15 +260,11 @@ class ForeignKeyFormField(ModelFormField):
         if self.blank is not None:
             return self.blank
         model = form._meta.model
-        field = model._meta.get_field(self.get_field_name(form, name))
+        field = model._meta.get_field(self.get_field_name(name))
         return field.blank
 
-    def get_form_class(self, form, name):
-        form_class = self.form_class
-        return form_class
-
     def get_instance(self, form, name):
-        field_name = self.get_field_name(form, name)
+        field_name = self.get_field_name(name)
         return getattr(form.instance, field_name)
 
     def save(self, form, name, composite_form, commit):
@@ -326,7 +276,7 @@ class ForeignKeyFormField(ModelFormField):
             saved_obj = super(ForeignKeyFormField, self).save(form, name,
                                                               composite_form,
                                                               commit)
-        setattr(form.instance, self.get_field_name(form, name), saved_obj)
+        setattr(form.instance, self.get_field_name(name), saved_obj)
         if commit:
             form.instance.save()
         else:
@@ -349,9 +299,9 @@ class FormSetField(CompositeField):
     widget = FormSetWidget
 
     def __init__(self, formset_class, kwargs=None, **field_kwargs):
+        self.formset_class = formset_class
         super(FormSetField, self).__init__(**field_kwargs)
 
-        self.formset_class = formset_class
         if kwargs is None:
             kwargs = {}
         self.default_kwargs = kwargs
@@ -375,6 +325,9 @@ class FormSetField(CompositeField):
             form.files if form.is_bound else None,
             **kwargs)
         return formset
+
+    def widget_attrs(self, widget):
+        return {'formset_class': self.formset_class}
 
 
 class ModelFormSetField(FormSetField):

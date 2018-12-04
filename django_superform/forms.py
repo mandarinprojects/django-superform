@@ -59,15 +59,15 @@ special in your view!
 Now to how you can access the instantiated formsets::
 
     >>> form = PostForm()
-    >>> form.composite_fields['comments']
+    >>> form.fields['comments']
     <CommetFormSet: ...>
 
 Or in the template::
 
     {{ form.as_p }}
 
-    {{ form.composite_fields.comments.management_form }}
-    {% for fieldset_form in form.composite_fields.comments %}
+    {{ form.fields.comments.management_form }}
+    {% for fieldset_form in form.fields.comments %}
         {{ fieldset_form.as_p }}
     {% endfor %}
 
@@ -75,12 +75,9 @@ You're welcome.
 
 """
 
-from functools import reduce
+import django
 from django import forms
-from django.forms.forms import DeclarativeFieldsMetaclass, ErrorDict, ErrorList
-from django.forms.models import ModelFormMetaclass
-from django.utils import six
-import copy
+from django.forms.forms import ErrorDict, ErrorList
 
 from .fields import CompositeField
 
@@ -90,76 +87,16 @@ except ImportError:
     from django.utils.datastructures import SortedDict as OrderedDict
 
 
-class DeclerativeCompositeFieldsMetaclass(type):
-    """
-    Metaclass that converts FormField and FormSetField attributes to a
-    dictionary called `composite_fields`. It will also include all composite
-    fields from parent classes.
-    """
-
-    def __new__(mcs, name, bases, attrs):
-        # Collect composite fields from current class.
-        current_fields = []
-        for key, value in list(attrs.items()):
-            if isinstance(value, CompositeField):
-                current_fields.append((key, value))
-                attrs.pop(key)
-        current_fields.sort(key=lambda x: x[1].creation_counter)
-        attrs['declared_composite_fields'] = OrderedDict(current_fields)
-
-        new_class = super(DeclerativeCompositeFieldsMetaclass, mcs).__new__(
-            mcs, name, bases, attrs)
-
-        # Walk through the MRO.
-        declared_fields = OrderedDict()
-        for base in reversed(new_class.__mro__):
-            # Collect fields from base class.
-            if hasattr(base, 'declared_composite_fields'):
-                declared_fields.update(base.declared_composite_fields)
-
-            # Field shadowing.
-            for attr, value in base.__dict__.items():
-                if value is None and attr in declared_fields:
-                    declared_fields.pop(attr)
-
-        new_class.base_composite_fields = declared_fields
-        new_class.declared_composite_fields = declared_fields
-
-        return new_class
-
-
-class SuperFormMetaclass(
-        DeclerativeCompositeFieldsMetaclass,
-        DeclarativeFieldsMetaclass):
-    """
-    Metaclass for :class:`~django_superform.forms.SuperForm`.
-    """
-
-
-class SuperModelFormMetaclass(
-        DeclerativeCompositeFieldsMetaclass,
-        ModelFormMetaclass):
-    """
-    Metaclass for :class:`~django_superform.forms.SuperModelForm`.
-    """
-
-
 class SuperFormMixin(object):
     """
     The base class for all super forms. It does not inherit from any other
-    classes, so you are free to mix it into any custom form class you have. You
-    need to use it together with ``SuperFormMetaclass``, like this:
+    classes, so you are free to mix it into any custom form class you have.
 
     .. code:: python
 
         from django_superform import SuperFormMixin
-        from django_superform import SuperFormMetaclass
-        import six
 
-        class MySuperForm(six.with_metaclass(
-                SuperFormMetaclass,
-                SuperFormMixin,
-                MyCustomForm)):
+        class MySuperForm(MyCustomForm):
             pass
 
     The goal of a superform is to behave just like a normal django form but is
@@ -175,30 +112,39 @@ class SuperFormMixin(object):
         super(SuperFormMixin, self).__init__(*args, **kwargs)
         self._init_composite_fields()
 
-    def __getitem__(self, name):
-        """
-        Returns a ``django.forms.BoundField`` for the given field name. It also
-        returns :class:`~django_superform.boundfield.CompositeBoundField`
-        instances for composite fields.
-        """
-        if name not in self.fields and name in self.composite_fields:
-            field = self.composite_fields[name]
-            return field.get_bound_field(self, name)
-        return super(SuperFormMixin, self).__getitem__(name)
+    if django.VERSION < (1, 9):
+        # This behavior is not needed after django 1.9 introduced
+        # get_bound_field.
 
-    def add_composite_field(self, name, field):
+        def __getitem__(self, name):
+            """
+            Returns a ``django.forms.BoundField`` for the given field name.
+            It also returns
+            :class:`~django_superform.boundfield.CompositeBoundField`
+            instances for composite fields.
+            """
+            field = self.fields[name]
+            if hasattr(field, 'get_bound_field'):
+                return field.get_bound_field(self, name)
+            return super(SuperFormMixin, self).__getitem__(name)
+
+    def add_prefix(self, name):
         """
-        Add a dynamic composite field to the already existing ones and
-        initialize it appropriatly.
+        Returns the field name with a prefix appended, if this Form has a
+        prefix set.
+
+        Subclasses may wish to override.
         """
-        self.composite_fields[name] = field
-        self._init_composite_field(name, field)
+        field = self.fields.get(name)
+        if isinstance(field, CompositeField):
+            return field.get_prefix(self, name)
+        return super(SuperFormMixin, self).add_prefix(name)
 
     def get_composite_field_value(self, name):
         """
         Return the form/formset instance for the given field name.
         """
-        field = self.composite_fields[name]
+        field = self.fields[name]
         if hasattr(field, 'get_form'):
             return self.forms[name]
         if hasattr(field, 'get_formset'):
@@ -207,26 +153,22 @@ class SuperFormMixin(object):
     def _init_composite_field(self, name, field):
         if hasattr(field, 'get_form'):
             form = field.get_form(self, name)
+            field.widget.form = form
             self.forms[name] = form
         if hasattr(field, 'get_formset'):
             formset = field.get_formset(self, name)
+            field.widget.formset = formset
             self.formsets[name] = formset
 
     def _init_composite_fields(self):
         """
         Setup the forms and formsets.
         """
-        # The base_composite_fields class attribute is the *class-wide*
-        # definition of fields. Because a particular *instance* of the class
-        # might want to alter self.composite_fields, we create
-        # self.composite_fields here by copying base_composite_fields.
-        # Instances should always modify self.composite_fields; they should not
-        # modify base_composite_fields.
-        self.composite_fields = copy.deepcopy(self.base_composite_fields)
         self.forms = OrderedDict()
         self.formsets = OrderedDict()
-        for name, field in self.composite_fields.items():
-            self._init_composite_field(name, field)
+        for name, field in self.fields.items():
+            if isinstance(field, CompositeField):
+                self._init_composite_field(name, field)
 
     def full_clean(self):
         """
@@ -247,14 +189,15 @@ class SuperFormMixin(object):
     @property
     def media(self):
         """
-        Incooperate composite field's media.
+        Incorporate composite field's media.
         """
-        media_list = []
-        media_list.append(super(SuperFormMixin, self).media)
-        for composite_name in self.composite_fields.keys():
-            form = self.get_composite_field_value(composite_name)
-            media_list.append(form.media)
-        return reduce(lambda a, b: a + b, media_list)
+        media = forms.Media()
+        for name, field in self.fields.items():
+            if isinstance(field, CompositeField):
+                media = media + self.get_composite_field_value(name).media
+            else:
+                media = media + field.widget.media
+        return media
 
 
 class SuperModelFormMixin(SuperFormMixin):
@@ -264,13 +207,8 @@ class SuperModelFormMixin(SuperFormMixin):
     .. code:: python
 
         from django_superform import SuperModelFormMixin
-        from django_superform import SuperModelFormMetaclass
-        import six
 
-        class MySuperForm(six.with_metaclass(
-                SuperModelFormMetaclass,
-                SuperModelFormMixin,
-                MyCustomModelForm)):
+        class MySuperForm(SuperModelFormMixin, MyCustomModelForm)):
             pass
     """
 
@@ -349,7 +287,7 @@ class SuperModelFormMixin(SuperFormMixin):
     def save_forms(self, commit=True):
         saved_composites = []
         for name, composite in self.forms.items():
-            field = self.composite_fields[name]
+            field = self.fields[name]
             if hasattr(field, 'save'):
                 field.save(self, name, composite, commit=commit)
                 saved_composites.append(composite)
@@ -364,7 +302,7 @@ class SuperModelFormMixin(SuperFormMixin):
         """
         saved_composites = []
         for name, composite in self.formsets.items():
-            field = self.composite_fields[name]
+            field = self.fields[name]
             if hasattr(field, 'save'):
                 field.save(self, name, composite, commit=commit)
                 saved_composites.append(composite)
@@ -372,8 +310,7 @@ class SuperModelFormMixin(SuperFormMixin):
         self._extend_save_m2m('save_formsets_m2m', saved_composites)
 
 
-class SuperModelForm(six.with_metaclass(SuperModelFormMetaclass,
-                                        SuperModelFormMixin, forms.ModelForm)):
+class SuperModelForm(SuperModelFormMixin, forms.ModelForm):
     """
     The ``SuperModelForm`` works like a Django ``ModelForm`` but has the
     capabilities of nesting like :class:`~django_superform.forms.SuperForm`.
@@ -382,8 +319,7 @@ class SuperModelForm(six.with_metaclass(SuperModelFormMetaclass,
     """
 
 
-class SuperForm(six.with_metaclass(SuperFormMetaclass,
-                                   SuperFormMixin, forms.Form)):
+class SuperForm(SuperFormMixin, forms.Form):
     """
     The base class for all super forms. The goal of a superform is to behave
     just like a normal django form but is able to take composite fields, like
