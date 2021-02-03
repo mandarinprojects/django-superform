@@ -265,7 +265,12 @@ class ForeignKeyFormField(ModelFormField):
 
     def get_instance(self, form, name):
         field_name = self.get_field_name(name)
-        return getattr(form.instance, field_name)
+        #return getattr(form.instance, field_name)
+        try:
+            return getattr(form.instance, field_name)
+        except:
+            return None
+
 
     def save(self, form, name, composite_form, commit):
         # Support the ``empty_permitted`` attribute. This is set if the field
